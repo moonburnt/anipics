@@ -1,4 +1,4 @@
-*Initially was named "picrandom", but I wanted to be able to increase its functionality*
+*Initially it was named "picrandom", but this kinda limited the scope of possible improvements*
 
 # Description:
 
@@ -16,8 +16,8 @@ Small discord bot, initially designed for posting random pictures from danbooru 
 # Usage:
 
 - Open launcher.sh in your text editor of choice
-- Edit its content accordingly (set up variable for discord key and, optionally - for bot's user agent (coz its possible to get banned with default one))
-- Run `./bootin_up.sh`
+- Edit its content accordingly (set up variable for discord key and, optionally - for bot's user agent (coz some places only allow browser-looking clients to fetch their content))
+- Run `./launcher.sh`
 
 Alternatively:
 - Set up envars by your own
