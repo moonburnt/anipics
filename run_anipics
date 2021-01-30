@@ -1,0 +1,306 @@
+#!/usr/bin/env python3
+
+## Anipics - simple discord bot, initially designed for posting random pictures from selected imageboards
+## Copyright (c) 2021 moonburnt
+##
+## This program is free software: you can redistribute it and/or modify
+## it under the terms of the GNU General Public License as published by
+## the Free Software Foundation, either version 3 of the License, or
+## (at your option) any later version.
+##
+## This program is distributed in the hope that it will be useful,
+## but WITHOUT ANY WARRANTY; without even the implied warranty of
+## MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+## GNU General Public License for more details.
+##
+## You should have received a copy of the GNU General Public License
+## along with this program.  If not, see https://www.gnu.org/licenses/gpl-3.0.txt
+
+import requests
+from bs4 import BeautifulSoup
+import discord
+from discord.ext import commands
+import logging
+from os import environ
+
+BOT_NAME = "anipics"
+BOT_PREFIX = "/"
+
+#logger stuff
+#setting up discord logger
+dlog = logging.getLogger('discord')
+#dlog.setLevel(logging.INFO)
+dlog.setLevel(logging.WARNING)
+handler = logging.StreamHandler()
+handler.setFormatter(logging.Formatter(fmt='[%(asctime)s][%(name)s][%(levelname)s] %(message)s', datefmt='%d.%m.%y %H:%M:%S'))
+dlog.addHandler(handler)
+
+#setting up custom logger
+log = logging.getLogger(__name__)
+log.setLevel(logging.INFO)
+#log.setLevel(logging.DEBUG)
+handler = logging.StreamHandler()
+handler.setFormatter(logging.Formatter(fmt='[%(asctime)s][%(name)s][%(levelname)s] %(message)s', datefmt='%d.%m.%y %H:%M:%S'))
+log.addHandler(handler)
+
+try:
+    USER_AGENT = str(environ['ANIPICS_USER_AGENT'])
+except Exception as e:
+    log.error(f"An error has occured during setting up bot's user agent: {e}")
+    log.info(f"Couldnt set up user agent, will use default")
+    USER_AGENT = None
+
+DANBOORU = 'https://danbooru.donmai.us/posts/random'
+E621 = 'https://e621.net/posts/random'
+
+#these used by danbooru and e621
+#tags also include filters for score, coz otherwise there would be loads of cringe on furry boards
+#SCORE = 'score%3A>%3D50' #default score is 50
+SCORE = 50 #default score is 50
+
+#tags for rating and score. Added as prefixes to urls
+SFW = '?tags=rating%3Asafe+score%3A>%3D'+str(SCORE)
+NSFW = '?tags=rating%3Aexplicit+score%3A>%3D'+str(SCORE)
+
+##maximum amount of retries, if something went wrong and image cant be fetched
+MAX_RETRIES = 3
+
+##Functions
+def get_page_source(link):
+    '''Receives str(webpage url), returns raw content of said page'''
+    #page = requests.get(link, timeout = 100, headers={"user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:78.0) Gecko/20100101 Firefox/78.0"})
+    if USER_AGENT:
+        page = requests.get(link, timeout = 100, headers={"user-agent": USER_AGENT})
+    else:
+        page = requests.get(link, timeout = 100)
+    page.raise_for_status()
+
+    return page.text
+
+def get_image_data(page):
+    '''Attempt to make unified function to fetch pics from all boorus'''
+    sauce = BeautifulSoup(page, 'html.parser')
+
+    #making a dictionary that will hold all data
+    mydic = {}
+    log.debug('Attempting to fetch new image')
+
+    #getting picture's title, which is the same as webpage name
+    page_name = sauce.title.string
+    log.debug(f'Title: {page_name}')
+    mydic['title'] = page_name
+
+    #getting link to webpage that will be displayed on footer
+    try:
+        log.debug(f'Trying to fetch post link in danbooru/derpibooru style')
+        lnk = sauce.find(rel="canonical")
+        post_link = lnk['href']
+    except:
+        log.debug(f'Trying to fetch post link in e621 style')
+        lnk = sauce.find("meta",  {"name":"canonical"})
+        post_link = lnk['content']
+    finally:
+        log.debug(f'Post Link: {post_link}')
+        mydic['url'] = post_link
+
+    #getting link to actual image, that will be shown
+    #if image has been banned - this will return error
+    try:
+        log.debug(f'Trying to fetch image link in danbooru/derpibooru style')
+        img = sauce.find(property="og:image")
+        image_link = img['content']
+    except:
+        log.debug(f'Trying to fetch image link in e621 style')
+        img = sauce.find("meta",  {"name":"og:image"})
+        image_link = img['content']
+    finally:
+        log.debug(f'Image Link: {image_link}')
+        mydic['image'] = image_link
+
+    #getting the name of author
+    try:
+        log.debug(f'Trying to fetch author in danbooru/e621 style')
+        a = sauce.find("ul", {"class":"artist-tag-list"})
+        au = a.find("a", {"class":"search-tag"})
+        author = au.text
+        log.debug(f'Author: {author}')
+        mydic['author'] = author
+    except:
+        #pass
+        mydic['author'] = None #this is necessary, coz simply passing things 'as is' will break error handling
+
+    #getting the name of fandom
+    try:
+        log.debug(f'Trying to fetch fandom in danbooru/e621 style')
+        f = sauce.find("ul", {"class":"copyright-tag-list"})
+        fa = f.find("a", {"class":"search-tag"})
+        fandom = fa.text
+        log.debug(f'Fandom: {fandom}')
+        mydic['fandom'] = fandom
+    except:
+        #pass
+        mydic['fandom'] = None
+
+    #getting list of characters
+    try:
+        log.debug(f'Trying to fetch characters in danbooru/e621 style')
+        c = sauce.find("ul", {"class":"character-tag-list"})
+        chars = []
+        for item in c.findAll("a", {"class": "search-tag"}):
+            chars.append(item.get_text())
+        characters = (', '.join(chars))
+
+        log.debug(f'Characters: {characters}')
+        mydic['characters'] = characters
+    except:
+        mydic['characters'] = None
+
+    #getting link to original author's post
+    try:
+        log.debug(f'Trying to fetch image source in danbooru style')
+        s = sauce.find("li", {"id": "post-info-source"})
+        sr = s.find("a", href=True)
+        source = sr.get('href')
+
+        log.debug(f'Source: {source}')
+        mydic['source'] = source
+    except AttributeError:
+        log.debug(f'Trying to fetch image source in e621 style')
+        s = sauce.find("li", {"class": "source-links"})
+        sr = s.find("a", href=True)
+        source = sr.get('href')
+
+        log.debug(f'Source: {source}')
+        mydic['source'] = source
+    except:
+        mydic['source'] = None
+
+    log.debug(mydic)
+
+    return mydic
+
+def img_post_maker(request):
+    '''Receives str(request) and str(rate, either adult or sfw), returns discord embed with random image'''
+
+    if request == 'anime':
+        url = DANBOORU+SFW
+    elif request == 'hentai':
+        url = DANBOORU+NSFW
+    elif request == 'furry':
+        url = E621+SFW
+    elif request == 'yiff':
+        url = E621+NSFW
+
+    retries = 0
+    while True:
+        try:
+            #url = request+rate
+            randompage = get_page_source(url)
+            picdata = get_image_data(randompage)
+        except Exception as e:
+            log.error(f"An error has occured during processing image: {e}")
+            if retries >= MAX_RETRIES:
+                break
+            else:
+                log.info(f"Couldnt fetch image, retrying [{retries}]")
+                retries += 1
+                continue
+
+        if picdata['image'].endswith(".gif") or picdata['image'].endswith(".webm") or picdata['image'].endswith(".swf"):
+            continue
+        else:
+            break
+
+    embed = discord.Embed()
+    embed.colour = 0x3498DB
+    embed.title = picdata['title'][:256]
+    embed.set_footer(text=picdata['url'])
+    embed.set_image(url=picdata['image'])
+
+    if picdata['author']:
+        embed.add_field(name="Author:", value=picdata['author'][:1024])
+    if picdata['fandom']:
+        embed.add_field(name="Fandom:", value=picdata['fandom'][:1024])
+    if picdata['characters']:
+        embed.add_field(name="Characters:", value=picdata['characters'][:1024], inline=False)
+    if picdata['source']:
+        embed.add_field(name="Source:", value=f"<{picdata['source']}>", inline=False)
+
+    return embed
+
+
+##Bot shenanigans
+bot = commands.Bot(command_prefix=BOT_PREFIX)
+#removing default help menu, coz its ugly as heck
+bot.remove_command('help')
+
+@bot.event
+async def on_ready():
+    log.info(f'Running {BOT_NAME} as {bot.user}!')
+
+@bot.event
+async def on_message(message):
+    if message.author == bot.user:
+        return
+
+    await bot.process_commands(message)
+
+@bot.command()
+async def ping(ctx):
+    await ctx.channel.send("pong")
+    log.info(f"{ctx.author.id} has pinged the bot on {ctx.guild.id}/{ctx.channel.id}. Responded")
+
+@bot.command()
+async def picrandom(ctx, *args):
+    if args:
+        if (args[0] == 'furry') or (args[0] == 'anime'):
+            try:
+                embedpic = img_post_maker(args[0])
+
+                await ctx.channel.send(content=None, embed=embedpic)
+                log.info(f"{ctx.author.id} has asked for {args[0]} on {ctx.guild.id}/{ctx.channel.id}. Granted")
+            except Exception as e:
+                await ctx.channel.send("I couldnt process your image, sowwy UwU")
+                log.warning(f"{ctx.author.id} has asked for {args[0]} on {ctx.guild.id}/{ctx.channel.id}, but image couldnt be retrieved")
+                log.error(f"The following error has occured: {e}")
+
+        elif (args[0] == 'yiff') or (args[0] == 'hentai'):
+            if ctx.channel.is_nsfw():
+                try:
+                    embedpic = img_post_maker(args[0])
+
+                    await ctx.channel.send(content=None, embed=embedpic)
+                    log.info(f"{ctx.author.id} has asked for {args[0]} on {ctx.guild.id}/{ctx.channel.id}. Granted")
+                except Exception as e:
+                    await ctx.channel.send("I couldnt process your image, sowwy UwU")
+                    log.warning(f"{ctx.author.id} has asked for {args[0]} on {ctx.guild.id}/{ctx.channel.id}, but image couldnt be retrieved")
+                    log.error(f"The following error has occured: {e}")
+            else:
+                await ctx.channel.send("Sorry, but this command is only available on NSFW channel")
+                log.info(f"{ctx.author.id} has asked for {args[0]} on {ctx.guild.id}/{ctx.channel.id}. Denied because of safety settings")
+
+        else:
+            await ctx.channel.send(f"I dont understand TT_TT\nType `{BOT_PREFIX}help` if you want to know how to use me")
+    else:
+        await ctx.channel.send(f"Nani? Want something?\nType `{BOT_PREFIX}help` if you want to know correct requests format!")
+
+@bot.command()
+async def help(ctx):
+    await ctx.channel.send(f"Hello, Im {BOT_NAME} bot and Im there to give you some random images of selected theme from imageboards!\n"
+    f"To ask for some random image, simply type `{BOT_PREFIX}picrandom some_theme`, where *some_theme* is what you want to see.\n\n"
+    f"Currently available themes are the following:\n> anime\n> hentai\n> furry\n> yiff\n"
+    )
+    log.info(f"{ctx.author.id} has asked for help on {ctx.guild.id}/{ctx.channel.id}. Granted")
+
+if __name__ == "__main__":
+    try:
+        BOT_TOKEN = str(environ['ANIPICS_BOT_TOKEN'])
+    except:
+        log.error("Invalid token error: ANIPICS_BOT_TOKEN environment variable doesnt exit.\nAbort")
+        exit(1)
+
+    try:
+        bot.run(BOT_TOKEN)
+    except discord.errors.LoginFailure or KeyError:
+        log.error("Invalid token error: ANIPICS_BOT_TOKEN environment variable has incorrect token.\nAbort")
+        exit(1)
